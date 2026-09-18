@@ -19,6 +19,12 @@ from decimal import Decimal
 
 from eth_account import Account
 from web3 import Web3
+from web3.exceptions import ContractLogicError
+try:
+    from web3.exceptions import Web3RPCError  # web3 v7+/v8
+except Exception:  # noqa: BLE001
+    class Web3RPCError(Exception):  # pragma: no cover - fallback
+        pass
 
 from config import settings
 from chains.base import ChainAdapter, WalletKeys, AssetBalance, FeeEstimate
@@ -91,6 +97,7 @@ _ERC20_ABI = [
 
 _w3_cache: dict[str, Web3] = {}
 _working_url: dict[str, str] = {}          # last known-good endpoint per chain
+_chain_ok: dict[str, bool] = {}            # f"{net}:{url}" -> eth_chainId validated
 _nonce_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
@@ -121,16 +128,50 @@ def _ordered_urls(network_key: str) -> list[str]:
     return urls
 
 
-def _sync_run(network_key: str, fn):
+def _check_chain(w3: Web3, network_key: str, url: str) -> None:
+    """Validate the endpoint really serves the expected chain (eth_chainId).
+    Cached per (network,url). Raises to skip a mismatched/broken endpoint."""
+    ck = f"{network_key}:{url}"
+    if ck in _chain_ok:
+        if not _chain_ok[ck]:
+            raise RpcUnavailable("endpoint failed chainId validation")
+        return
+    cid = w3.eth.chain_id  # connection errors propagate -> try next endpoint
+    expected = NETWORKS[network_key].chain_id
+    ok = expected is None or int(cid) == int(expected)
+    _chain_ok[ck] = ok
+    if not ok:
+        logger.warning("rpc chain mismatch net=%s url=%s got=%s expected=%s",
+                       network_key, url, cid, expected)
+        raise RpcUnavailable("wrong chain id")
+
+
+def _sync_run(network_key: str, fn, retry_rpc_error: bool = True):
     urls = _ordered_urls(network_key)
     if not urls:
         raise RpcUnavailable(f"no RPC configured for {network_key}")
     last: Exception | None = None
     for url in urls:
         try:
-            res = fn(_w3_for(url))
+            w3 = _w3_for(url)
+            _check_chain(w3, network_key, url)
+            res = fn(w3)
             _working_url[network_key] = url
             return res
+        except ContractLogicError:
+            # deterministic (e.g. a token that reverts) — do NOT try other
+            # endpoints; let the caller decide (portfolio skips such tokens).
+            raise
+        except Web3RPCError:
+            # A node-processed JSON-RPC error. For sends this is the real reason
+            # (insufficient funds / nonce / already-known) — surface it and NEVER
+            # retry (retrying could double-broadcast). For reads, a single node
+            # may be flaky, so fall through to the next endpoint.
+            if not retry_rpc_error:
+                raise
+            last = _last_exc()
+            logger.warning("rpc node error net=%s endpoint=%s", network_key, url)
+            continue
         except Exception as e:  # noqa: BLE001
             last = e
             logger.warning("rpc call failed net=%s endpoint=%s err=%s",
@@ -139,8 +180,13 @@ def _sync_run(network_key: str, fn):
     raise RpcUnavailable(f"all RPC endpoints failed for {network_key}: {type(last).__name__ if last else '??'}")
 
 
-async def _run(network_key: str, fn):
-    return await asyncio.to_thread(_sync_run, network_key, fn)
+def _last_exc():
+    import sys
+    return sys.exc_info()[1]
+
+
+async def _run(network_key: str, fn, retry_rpc_error: bool = True):
+    return await asyncio.to_thread(_sync_run, network_key, fn, retry_rpc_error)
 
 
 class EVMAdapter(ChainAdapter):
@@ -258,7 +304,7 @@ class EVMAdapter(ChainAdapter):
                 signed = w3.eth.account.sign_transaction(tx, acct.key)
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 return tx_hash.hex()
-            return await _run(network_key, fn)
+            return await _run(network_key, fn, retry_rpc_error=False)
 
     async def send_token(self, network_key: str, private_key: str, token_address: str,
                         decimals: int, to_address: str, amount: Decimal) -> str:
@@ -283,7 +329,7 @@ class EVMAdapter(ChainAdapter):
                 signed = w3.eth.account.sign_transaction(tx, acct.key)
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 return tx_hash.hex()
-            return await _run(network_key, fn)
+            return await _run(network_key, fn, retry_rpc_error=False)
 
     async def get_receipt_status(self, network_key: str, tx_hash: str) -> int | None:
         """Return 1 (success), 0 (revert), or None (still pending / unknown)."""

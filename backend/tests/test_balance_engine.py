@@ -38,6 +38,7 @@ def test_rpc_fallback_tries_next_endpoint(monkeypatch):
 
     monkeypatch.setattr(EVM, "_ordered_urls", lambda net: ["https://bad", "https://good"])
     monkeypatch.setattr(EVM, "_w3_for", fake_w3_for)
+    monkeypatch.setattr(EVM, "_check_chain", lambda w3, net, url: None)
 
     def fn(w3):
         if not w3._ok:
@@ -127,7 +128,44 @@ async def _empty_dict():
     return {}
 
 
-# ---- chain isolation: a token is only sendable where it is configured ----
+# ---- send must surface the REAL node error and never retry-broadcast ----
+def test_send_does_not_retry_node_errors(monkeypatch):
+    calls = []
+    monkeypatch.setattr(EVM, "_ordered_urls", lambda net: ["u1", "u2", "u3"])
+    monkeypatch.setattr(EVM, "_w3_for", lambda url: url)
+    monkeypatch.setattr(EVM, "_check_chain", lambda w3, net, url: None)
+
+    def fn(w3):
+        calls.append(w3)
+        raise EVM.Web3RPCError({"code": -32000, "message": "insufficient funds"})
+
+    # send path: re-raise the real error immediately, try ONE endpoint only
+    with pytest.raises(EVM.Web3RPCError):
+        EVM._sync_run("ethereum", fn, retry_rpc_error=False)
+    assert calls == ["u1"], "send must not retry a node-returned RPC error (no double-broadcast)"
+
+    # read path: a flaky node error may be retried across endpoints
+    calls.clear()
+    with pytest.raises(RpcUnavailable):
+        EVM._sync_run("ethereum", fn, retry_rpc_error=True)
+    assert calls == ["u1", "u2", "u3"]
+
+
+def test_eth_chainid_validation_rejects_wrong_chain(monkeypatch):
+    monkeypatch.setattr(EVM, "_ordered_urls", lambda net: ["only"])
+    monkeypatch.setattr(EVM, "_w3_for", lambda url: url)
+    EVM._chain_ok.clear()
+
+    class _Eth:
+        chain_id = 999  # wrong for ethereum (expected 1)
+
+    class _W3:
+        eth = _Eth()
+
+    monkeypatch.setattr(EVM, "_w3_for", lambda url: _W3())
+    with pytest.raises(RpcUnavailable):
+        EVM._sync_run("ethereum", lambda w3: "should-not-run")
+    EVM._chain_ok.clear()
 def test_token_chain_isolation():
     assert catalog.token_by_symbol("ethereum", "USDT") is not None
     assert catalog.token_by_symbol("base", "USDT") is None       # not configured on Base

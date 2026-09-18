@@ -120,6 +120,19 @@ optional provider-independent email · webhook auth · secret redaction · tests
   fallback-to-next, RpcUnavailable, discovery key-gating, partial-outage
   portfolio, no-fake-price total, chain isolation).
 
+## Fixed (2026-06) — session 4 (send regression + perf)
+- ✅ SEND REGRESSION FIXED: `_sync_run` retried node-returned JSON-RPC errors
+  (insufficient funds / nonce / already-known) across all endpoints and then
+  masked them as `RpcUnavailable` — hiding the real reason and risking a
+  double-broadcast. Sends now use `retry_rpc_error=False`: the real error is
+  surfaced and broadcast happens once on the first working endpoint. Verified
+  the full sign path (empty wallet → real "insufficient funds", funded → hash).
+- ✅ PERFORMANCE: portfolio now fetches all networks concurrently (asyncio.gather)
+  and verifies discovered tokens concurrently (capped 25/net). Real imported
+  wallet home render dropped from ~30-90s (sequential) to ~4s.
+- ✅ `eth_chainId` validation per endpoint (cached) — never uses an RPC that
+  serves the wrong chain; `ContractLogicError` no longer retried across endpoints.
+
 ### Explorer / RPC providers
 - RPC (primary): publicnode.com, drpc.org, ankr, chain-official — per chain, with fallback.
 - Explorer/indexer: Etherscan V2 unified API (chainid) for token discovery + history-ready.

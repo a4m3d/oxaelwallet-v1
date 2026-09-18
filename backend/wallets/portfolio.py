@@ -10,6 +10,7 @@ Reliability & honesty:
   tokens without pricing are shown without a fabricated value.
 """
 from __future__ import annotations
+import asyncio
 from decimal import Decimal
 
 from assets.catalog import NETWORKS, evm_networks, tokens_for
@@ -18,6 +19,24 @@ from chains.evm import evm_adapter
 from chains.solana import solana_adapter
 from chains.base import AssetBalance
 from utils.prices import get_prices
+
+
+async def _verify_token(network_key: str, address: str, tok: dict) -> AssetBalance | None:
+    try:
+        amt = await evm_adapter.token_balance(network_key, tok, address)
+    except Exception:  # noqa: BLE001  (reverts / non-standard tokens)
+        return None
+    if amt <= 0:
+        return None
+    return AssetBalance(
+        symbol=(tok.get("symbol") or "Unknown"),
+        network=network_key,
+        amount=amt,
+        decimals=int(tok.get("decimals", 18)),
+        token_address=tok["address"],
+        name=(tok.get("name") or None),
+        verified=False,  # discovered, not from our curated catalog
+    )
 
 
 async def _evm_network_assets(network_key: str, address: str) -> tuple[list[AssetBalance], str]:
@@ -30,26 +49,13 @@ async def _evm_network_assets(network_key: str, address: str) -> tuple[list[Asse
 
     have = {(b.token_address or "").lower() for b in bals if b.token_address}
     catalog_addrs = {t["address"].lower() for t in tokens_for(network_key)}
-    for tok in await discover_token_contracts(network_key, address):
-        addr = tok["address"].lower()
-        if addr in have or addr in catalog_addrs:
-            continue
-        try:
-            amt = await evm_adapter.token_balance(network_key, tok, address)
-        except Exception:  # noqa: BLE001
-            continue
-        if amt > 0:
-            ab = AssetBalance(
-                symbol=(tok.get("symbol") or "Unknown"),
-                network=network_key,
-                amount=amt,
-                decimals=int(tok.get("decimals", 18)),
-                token_address=tok["address"],
-                name=(tok.get("name") or None),
-                verified=False,  # discovered, not from our curated catalog
-            )
-            bals.append(ab)
-            have.add(addr)
+    candidates = [
+        tok for tok in await discover_token_contracts(network_key, address)
+        if tok["address"].lower() not in have and tok["address"].lower() not in catalog_addrs
+    ][:25]
+    if candidates:
+        verified = await asyncio.gather(*[_verify_token(network_key, address, t) for t in candidates])
+        bals.extend([b for b in verified if b is not None])
     return bals, status
 
 
@@ -59,19 +65,23 @@ async def get_portfolio(wallet: dict) -> tuple[list[AssetBalance], Decimal | Non
     statuses: dict[str, str] = {}
 
     evm_addr = addresses.get("evm")
-    if evm_addr:
-        for net in evm_networks():
-            bals, status = await _evm_network_assets(net.key, evm_addr)
-            statuses[net.key] = status
-            balances.extend(bals)
-
+    tasks = []
+    nets = list(evm_networks()) if evm_addr else []
+    for net in nets:
+        tasks.append(_evm_network_assets(net.key, evm_addr))
     if "solana" in addresses:
-        try:
-            sb = await solana_adapter.get_balances(addresses["solana"])
-            statuses["solana"] = "ok"
-            balances.extend(sb)
-        except Exception:  # noqa: BLE001
-            statuses["solana"] = "unavailable"
+        async def _sol():
+            try:
+                return await solana_adapter.get_balances(addresses["solana"]), "ok"
+            except Exception:  # noqa: BLE001
+                return [], "unavailable"
+        tasks.append(_sol())
+
+    results = await asyncio.gather(*tasks) if tasks else []
+    keys = [n.key for n in nets] + (["solana"] if "solana" in addresses else [])
+    for key, (bals, status) in zip(keys, results):
+        statuses[key] = status
+        balances.extend(bals)
 
     # keep only assets actually held
     balances = [b for b in balances if b.amount > 0]
