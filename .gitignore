@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & env
+.env
+backend/.env
+*.env.local
+
+# Virtualenvs
+.venv/
+venv/
+
+# Not part of this Telegram-only project
+frontend/
+
+# Misc
+test_reports/
+.DS_Store
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+
+# Allow the safe example template to be committed (no real secrets)
+!.env.example
+!backend/.env.example

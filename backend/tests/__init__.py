@@ -1,0 +1,1 @@
+"""OXAEL WALLET test suite."""

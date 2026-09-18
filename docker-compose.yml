@@ -1,0 +1,28 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - oxael_mongo:/data/db
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    env_file:
+      - backend/.env
+    environment:
+      # Override so the container reaches the compose mongo service
+      MONGO_URL: "mongodb://mongo:27017"
+      DB_NAME: "oxael_wallet"
+      PORT: "8001"
+    ports:
+      - "8001:8001"
+
+volumes:
+  oxael_mongo:

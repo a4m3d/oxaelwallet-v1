@@ -1,0 +1,1 @@
+"""OXAEL WALLET Telegram package."""

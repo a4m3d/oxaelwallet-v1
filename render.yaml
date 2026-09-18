@@ -1,0 +1,33 @@
+# OXAEL WALLET — Render Blueprint
+# Deploys the Telegram-only wallet backend. Set secret env vars in the dashboard.
+services:
+  - type: web
+    name: oxael-wallet
+    runtime: python
+    rootDir: backend
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_NAME
+        value: oxael_wallet
+      - key: NEAR_INTENTS_BASE
+        value: https://1click.chaindefuser.com
+      - key: EMAIL_FROM_NAME
+        value: OXAEL WALLET
+      - key: CORS_ORIGINS
+        value: "*"
+      # --- set these as secrets in the Render dashboard ---
+      - key: MONGO_URL
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: WALLET_ENCRYPTION_KEY
+        sync: false
+      - key: NEAR_INTENTS_JWT
+        sync: false
