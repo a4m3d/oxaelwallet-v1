@@ -40,6 +40,7 @@ BOT_COMMANDS = [
     {"command": "swap", "description": "Cross-chain swap"},
     {"command": "history", "description": "Transaction history"},
     {"command": "track", "description": "Track wallet activity"},
+    {"command": "gasaccount", "description": "Gas Account (pays network fees)"},
     {"command": "settings", "description": "Settings & security"},
     {"command": "help", "description": "How OXAEL works"},
 ]

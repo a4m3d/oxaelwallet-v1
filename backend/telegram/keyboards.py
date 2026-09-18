@@ -36,8 +36,8 @@ def main_menu() -> dict:
         [btn("↑  Send", "send"), btn("↓  Receive", "recv")],
         [btn("⇄  Swap", "swap"), btn("🪙  Tokens", "tokens")],
         [btn("◷  Activity", "hist"), btn("🔔  Track", "track")],
-        [btn("👛  Wallets", "wallets"), btn("⚙️  Settings", "settings")],
-        [btn("↻  Refresh", "home")],
+        [btn("👛  Wallets", "wallets"), btn("⛽  Gas", "gas")],
+        [btn("⚙️  Settings", "settings"), btn("↻  Refresh", "home")],
     ])
 
 

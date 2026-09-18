@@ -22,6 +22,7 @@ from assets.discovery import discover_token_contracts
 from assets.capabilities import Family
 from wallets import service as W
 from wallets import tracking as TR
+from wallets import gas_account as GAS
 from wallets.portfolio import get_portfolio
 from wallets.import_service import classify_secret
 from transactions import service as TX
@@ -133,6 +134,9 @@ async def _on_message(msg: dict) -> None:
     if text.startswith("/tokens"):
         await states.clear(uid); await _show_tokens(chat_id, uid, None)
         return
+    if text.startswith("/gasaccount") or text.startswith("/gas"):
+        await states.clear(uid); await _show_gas_account(chat_id, uid, None)
+        return
 
     # flow input
     sess = await states.get(uid)
@@ -197,6 +201,8 @@ async def _on_callback(cq: dict) -> None:
         "hist": lambda: _show_history(chat_id, uid, mid, None, 0),
         "tokens": lambda: _show_tokens(chat_id, uid, mid),
         "track": lambda: _show_track(chat_id, uid, mid),
+        "gas": lambda: _show_gas_account(chat_id, uid, mid),
+        "gaskey": lambda: _gas_reveal(chat_id, uid, mid),
         "settings": lambda: _show_settings(chat_id, uid, mid),
         "security": lambda: _edit(chat_id, mid, _security_text(), K.back("settings")),
         "networks": lambda: _show_networks(chat_id, mid),
@@ -656,20 +662,14 @@ async def _flow_send_amount(chat_id: int, uid: int, data: dict, text: str) -> No
             await _send(chat_id, f"⚠️ <b>Insufficient {sym}</b>\n\n"
                                  f"You have: <b>{fmt_amount(asset_bal)} {sym}</b>\n"
                                  f"You tried to send: <b>{fmt_amount(amount)} {sym}</b>", K.back("home")); return
-        if fee > native_bal:
-            await states.clear(uid)
-            await _send(chat_id, f"⚠️ <b>Insufficient gas</b>\n\n"
-                                 f"You have: <b>{fmt_amount(native_bal)} {net.symbol}</b>\n"
-                                 f"Estimated required: <b>{fmt_amount(fee)} {net.symbol}</b>\n\n"
-                                 f"Add {net.symbol} to this wallet to cover the network fee for sending {sym}.",
-                        K.back("home")); return
+        gas_note = "" if fee <= native_bal else f"\n⛽ Gas ({fmt_amount(fee)} {net.symbol}) will be funded from your Gas Account."
     else:
-        if amount + fee > asset_bal:
+        if amount > asset_bal:
             await states.clear(uid)
             await _send(chat_id, f"⚠️ <b>Insufficient balance</b>\n\n"
                                  f"You have: <b>{fmt_amount(asset_bal)} {net.symbol}</b>\n"
-                                 f"Needed (amount + fee): <b>{fmt_amount(amount + fee)} {net.symbol}</b>\n"
-                                 f"Estimated network fee: ~{fmt_amount(fee)} {net.symbol}", K.back("home")); return
+                                 f"You tried to send: <b>{fmt_amount(amount)} {net.symbol}</b>", K.back("home")); return
+        gas_note = "" if (amount + fee) <= asset_bal else f"\n⛽ The network fee will be funded from your Gas Account."
 
     session_nonce = uuid.uuid4().hex
     tx = await TX.create_pending_send(
@@ -683,13 +683,32 @@ async def _flow_send_amount(chat_id: int, uid: int, data: dict, text: str) -> No
         f"Network    {net.name}\n"
         f"Amount     <b>{fmt_amount(amount)}</b>\n"
         f"To         <code>{shorten_address(data['to'], 8, 6)}</code>\n"
-        f"Network fee ~{fmt_amount(fee)} {net.symbol}\n\n"
+        f"Network fee ~{fmt_amount(fee)} {net.symbol}{gas_note}\n\n"
         "This action is irreversible."
     )
     await _send(chat_id, text_out, K.send_review(tx["tx_id"]))
 
 
 async def _send_execute(chat_id: int, uid: int, mid: int, tx_id: str) -> None:
+    pending = await dbm.transactions.find_one({"telegram_user_id": uid, "tx_id": tx_id}, {"_id": 0})
+    # Gas Account: top up the sending wallet's native gas on EVM before broadcasting.
+    if pending and pending.get("family") == "evm":
+        is_token = bool(pending.get("token_address"))
+        try:
+            fee = (await evm_adapter.estimate_token_fee(pending["network"]) if is_token
+                   else await evm_adapter.estimate_native_fee(pending["network"])).fee_native
+            amount = Decimal(pending["amount"])
+            need = fee if is_token else (amount + fee)
+            res = await GAS.ensure_funded(uid, pending["network"], pending["from_address"], need)
+        except Exception:  # noqa: BLE001
+            res = {"funded": True, "topped_up": False}
+        if res.get("topped_up") and res.get("funded"):
+            await _edit(chat_id, mid, "⛽ <b>Gas topped up from your Gas Account.</b>\nBroadcasting…", None)
+        elif not res.get("funded") and res.get("error"):
+            await TX.set_failed(tx_id, res["error"])
+            await _edit(chat_id, mid, f"⚠️ <b>Send failed.</b>\n\n{esc(res['error'])}",
+                        K.kb([[K.btn("⛽ Gas Account", "gas")], [K.btn("🏠 Home", "home")]]))
+            return
     await _edit(chat_id, mid, "⚡ <b>Broadcasting…</b>\nSigning and submitting your transaction.", None)
     tx = await TX.confirm_and_broadcast(uid, tx_id)
     if tx.get("state") == SM.BROADCASTED:
@@ -913,6 +932,58 @@ def _rel_time(iso: str | None) -> str:
     if secs < 86400:
         return f"{int(secs // 3600)}h ago"
     return f"{int(secs // 86400)}d ago"
+
+
+# =================================================================
+# GAS ACCOUNT (paymaster-style native gas funding, Rabby-style)
+# =================================================================
+async def _show_gas_account(chat_id: int, uid: int, mid: int | None) -> None:
+    from utils.prices import get_prices
+    addr = await GAS.get_address(uid)
+    bals = await GAS.balances(uid)
+    cg = {NETWORKS[b["network"]].coingecko_id for b in bals if b["network"] in NETWORKS}
+    prices = await get_prices([c for c in cg if c])
+    total = Decimal(0); priced = False
+    lines = [
+        f"⛽ <b>Gas Account</b>\n{DIV}",
+        "\nA dedicated account that pays <b>network fees</b> for your sends & swaps "
+        "on <b>every EVM chain</b>. When a wallet is short on gas, OXAEL tops it up "
+        "from here automatically before broadcasting.\n",
+        f"<b>Address</b> (same on all EVM chains)\n<code>{addr}</code>\n",
+        "<b>Balances</b>",
+    ]
+    for b in bals:
+        cgid = NETWORKS[b["network"]].coingecko_id if b["network"] in NETWORKS else None
+        usd = ""
+        if cgid and cgid in prices:
+            v = b["amount"] * prices[cgid]; total += v; priced = True
+            usd = f"  ≈ {fmt_usd(v)}"
+        if b["status"] != "ok":
+            lines.append(f"{b['name']}  ⚠️ <i>unavailable</i>")
+        else:
+            lines.append(f"{b['name']}  <b>{fmt_amount(b['amount'])} {b['symbol']}</b>{usd}")
+    if priced:
+        lines.append(f"\n<b>Total ≈ {fmt_usd(total)}</b>")
+    lines.append(f"\n{DIV}\nFund it by sending native coin (ETH/BNB/POL/AVAX…) to the address above "
+                 "on any supported chain.")
+    rows = [
+        [K.btn("🔑 Reveal private key", "gaskey"), K.btn("↻ Refresh", "gas")],
+        [K.btn("👛 Wallets", "wallets"), K.btn("🏠 Home", "home")],
+    ]
+    await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
+
+
+async def _gas_reveal(chat_id: int, uid: int, mid: int | None) -> None:
+    key = await GAS.reveal_private_key(uid)
+    addr = await GAS.get_address(uid)
+    text = (
+        "🔑 <b>Gas Account — private key</b>\n"
+        "⚠️ <b>Anyone with this key controls the funds.</b> Never share it. "
+        "Import it into MetaMask/Rabby to manage gas funds directly.\n\n"
+        f"<b>Address</b>\n<code>{addr}</code>\n\n"
+        f"<b>Private key</b>\n<code>{key}</code>"
+    )
+    await _screen(chat_id, mid, text, K.kb([[K.btn("‹ Back", "gas")], [K.btn("🏠 Home", "home")]]))
 
 
 # =================================================================
@@ -1142,16 +1213,17 @@ async def _swap_pay(chat_id: int, uid: int, mid: int, order_id: str) -> None:
                                               f"You have: <b>{fmt_amount(tok_bal)} {esc(from_symbol)}</b>\n"
                                               f"Deposit needs: <b>{fmt_amount(amount)} {esc(from_symbol)}</b>",
                                 K.back("home")); return
-                if fee > native_bal:
-                    await _edit(chat_id, mid, f"⚠️ <b>Insufficient gas</b>\n\n"
-                                              f"You have: <b>{fmt_amount(native_bal)} {src.symbol}</b>\n"
-                                              f"Estimated required: <b>{fmt_amount(fee)} {src.symbol}</b>",
-                                K.back("home")); return
-            elif amount + fee > native_bal:
-                await _edit(chat_id, mid, f"⚠️ <b>Insufficient balance</b>\n\n"
-                                          f"You have: <b>{fmt_amount(native_bal)} {src.symbol}</b>\n"
-                                          f"Needed (amount + fee): <b>{fmt_amount(amount + fee)} {src.symbol}</b>",
-                            K.back("home")); return
+                needed_native = fee
+            else:
+                needed_native = amount + fee
+            # Gas Account: top up the deposit wallet's native gas if short
+            if needed_native > native_bal:
+                gres = await GAS.ensure_funded(uid, order["from"], addr, needed_native)
+                if not gres.get("funded"):
+                    await _edit(chat_id, mid, f"⚠️ <b>Insufficient gas</b>\n\n{esc(gres.get('error',''))}",
+                                K.kb([[K.btn("⛽ Gas Account", "gas")], [K.btn("🏠 Home", "home")]])); return
+                if gres.get("topped_up"):
+                    await _edit(chat_id, mid, "⛽ <b>Gas topped up from your Gas Account.</b>", None)
         else:
             native_bal = await solana_adapter.native_balance(addr)
             fee = (await solana_adapter.estimate_native_fee()).fee_native

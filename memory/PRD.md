@@ -120,6 +120,22 @@ optional provider-independent email · webhook auth · secret redaction · tests
   fallback-to-next, RpcUnavailable, discovery key-gating, partial-outage
   portfolio, no-fake-price total, chain isolation).
 
+## Added (2026-06) — session 7 (Gas Account / paymaster-style gas funding)
+- ✅ **Gas Account** (`/gasaccount`, `wallets/gas_account.py` + `gas_accounts`
+  collection): a dedicated EVM keypair per user (same address on all EVM chains).
+  Screen shows the address, per-chain native balances + USD total, a deposit hint,
+  and a **🔑 Reveal private key** export (user-initiated; key stored encrypted,
+  never logged). Added to command menu + main-menu ⛽ Gas button.
+- ✅ **Auto gas funding** (honest Rabby-style, no fake paymaster): EVM gas must be
+  paid by the signer, so before broadcasting a send/swap the wallet's native gas
+  is topped up from the Gas Account by the exact shortfall (×1.15 buffer), waits
+  for that tx to confirm, then broadcasts. If the Gas Account is too low it fails
+  with a clear message + shortcut to /gasaccount. Wired into `_send_execute` and
+  swap `_swap_pay`; send pre-checks relaxed to defer gas to the Gas Account.
+- ✅ Tests: 74 passing (added test_gas_account.py: stable address, key export
+  round-trips to the address, no-op when funded, low-balance reporting). Live:
+  `/gasaccount` creates the account on first use.
+
 ## Added (2026-06) — session 6 (track external addresses + full 1Click swap)
 - ✅ **Track ANY pasted address** (not just owned wallets): `wallets/tracking.py`
   + `tracked_wallets` collection. `/track` now has "➕ Track an address" → paste
