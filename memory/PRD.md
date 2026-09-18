@@ -120,6 +120,21 @@ optional provider-independent email · webhook auth · secret redaction · tests
   fallback-to-next, RpcUnavailable, discovery key-gating, partial-outage
   portfolio, no-fake-price total, chain isolation).
 
+## Added (2026-06) — session 5 (standalone /track + deposit feed + back-nav)
+- ✅ `/track` is now its OWN section (not merged into Wallets): shows a live
+  **deposit feed** (amount · token · chain · sender · time) across all wallets,
+  plus per-wallet tracking toggles and a paginated "All deposits" view.
+- ✅ Real incoming-transaction detection via Etherscan V2 (`get_incoming_transfers`
+  — native `txlist` + ERC-20 `tokentx`) with real **tx hash + sender**, deduped
+  by tx hash. First scan of a (wallet,network) **seeds silently** (records history
+  for the feed, no notification spam); only genuinely new deposits notify.
+  Falls back to balance-snapshot detection when no explorer key / for Solana.
+- ✅ `track_cursor` collection (per wallet+network last-seen timestamp) for
+  dedup; `deposits()`/`deposits_count()` queries; `record_detected_receive`
+  now stores tx_hash/from_address and returns inserted/deduped.
+- ✅ Back navigation added where nested (history→wallet, track deposits→track),
+  in addition to the existing contextual `‹ Back` throughout send/receive/swap.
+
 ## Fixed (2026-06) — session 4 (send regression + perf)
 - ✅ SEND REGRESSION FIXED: `_sync_run` retried node-returned JSON-RPC errors
   (insufficient funds / nonce / already-known) across all endpoints and then

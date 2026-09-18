@@ -200,8 +200,21 @@ async def set_failed(tx_id: str, err: str = "transaction reverted") -> None:
 
 
 async def record_detected_receive(telegram_user_id: int, wallet_id: str, network: str,
-                                  asset: str, amount: str) -> None:
+                                  asset: str, amount: str, tx_hash: str | None = None,
+                                  from_address: str | None = None,
+                                  token_address: str | None = None) -> bool:
+    """Record an incoming deposit. Deduplicated by tx_hash when available.
+    Returns True if a new record was inserted, False if it already existed."""
     net = NETWORKS.get(network)
+    if tx_hash:
+        existing = await dbm.transactions.find_one(
+            {"wallet_id": wallet_id, "tx_hash": tx_hash, "direction": "receive"},
+            {"_id": 1},
+        )
+        if existing:
+            return False
+    net_key = f"recv:{tx_hash}" if tx_hash else f"recv:{uuid.uuid4().hex}"
+    explorer = net.explorer_tx(tx_hash) if (net and tx_hash) else None
     doc = {
         "tx_id": uuid.uuid4().hex,
         "telegram_user_id": telegram_user_id,
@@ -212,13 +225,32 @@ async def record_detected_receive(telegram_user_id: int, wallet_id: str, network
         "direction": "receive",
         "amount": str(amount),
         "state": sm.CONFIRMED,
-        "idempotency_key": f"recv:{uuid.uuid4().hex}",
-        "tx_hash": None,
-        "explorer_url": None,
+        "idempotency_key": net_key,
+        "tx_hash": tx_hash,
+        "from_address": from_address,
+        "token_address": token_address,
+        "explorer_url": explorer,
         "created_at": _now(),
         "updated_at": _now(),
     }
     await dbm.transactions.insert_one(dict(doc))
+    return True
+
+
+async def deposits(telegram_user_id: int, wallet_id: str | None = None,
+                   limit: int = 10, skip: int = 0) -> list[dict]:
+    q: dict = {"telegram_user_id": telegram_user_id, "direction": "receive"}
+    if wallet_id:
+        q["wallet_id"] = wallet_id
+    cur = dbm.transactions.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
+    return [d async for d in cur]
+
+
+async def deposits_count(telegram_user_id: int, wallet_id: str | None = None) -> int:
+    q: dict = {"telegram_user_id": telegram_user_id, "direction": "receive"}
+    if wallet_id:
+        q["wallet_id"] = wallet_id
+    return await dbm.transactions.count_documents(q)
 
 
 async def history(telegram_user_id: int, wallet_id: str | None = None,

@@ -86,3 +86,85 @@ async def discover_token_contracts(network_key: str, address: str) -> list[dict]
     _CACHE[key] = (now, out)
     logger.info("discovery net=%s address_touched_tokens=%d", network_key, len(out))
     return out
+
+
+async def get_incoming_transfers(network_key: str, address: str) -> list[dict]:
+    """Recent INCOMING transfers (native + ERC-20) to `address` on this chain.
+
+    Returns [{hash, from_addr, symbol, name, amount, decimals, ts, token_address}]
+    newest-first. Empty if unsupported/unavailable (safe fallback). Read-only.
+    """
+    if not supported(network_key) or not address:
+        return []
+    cid = _CHAIN_ID[network_key]
+    addr = address.lower()
+    out: list[dict] = []
+
+    async def _call(action: str) -> list:
+        params = {
+            "chainid": cid, "module": "account", "action": action,
+            "address": address, "page": 1, "offset": 25, "sort": "desc",
+            "apikey": settings.ETHERSCAN_API_KEY,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15) as h:
+                r = await h.get(_BASE, params=params)
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("incoming scan failed net=%s action=%s err=%s",
+                           network_key, action, type(e).__name__)
+            return []
+        res = data.get("result")
+        return res if isinstance(res, list) else []
+
+    # native coin transfers
+    for t in await _call("txlist"):
+        try:
+            if (t.get("to") or "").lower() != addr:
+                continue
+            val = int(t.get("value") or 0)
+            if val <= 0 or (t.get("isError") not in (None, "0")):
+                continue
+            out.append({
+                "hash": t.get("hash"), "from_addr": t.get("from"),
+                "symbol": _NATIVE_SYMBOL.get(network_key, ""), "name": "",
+                "amount": str(_to_decimal(val, 18)), "decimals": 18,
+                "ts": int(t.get("timeStamp") or 0), "token_address": None,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+
+    # ERC-20 transfers
+    for t in await _call("tokentx"):
+        try:
+            if (t.get("to") or "").lower() != addr:
+                continue
+            dec = int(t.get("tokenDecimal") or 18)
+            val = int(t.get("value") or 0)
+            if val <= 0:
+                continue
+            out.append({
+                "hash": t.get("hash"), "from_addr": t.get("from"),
+                "symbol": (t.get("tokenSymbol") or "TOKEN")[:16],
+                "name": (t.get("tokenName") or "")[:40],
+                "amount": str(_to_decimal(val, dec)), "decimals": dec,
+                "ts": int(t.get("timeStamp") or 0),
+                "token_address": (t.get("contractAddress") or "").lower() or None,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return out[:30]
+
+
+_NATIVE_SYMBOL = {
+    "ethereum": "ETH", "base": "ETH", "arbitrum": "ETH", "optimism": "ETH",
+    "polygon": "POL", "bnb": "BNB", "avalanche": "AVAX",
+}
+
+
+def _to_decimal(raw: int, decimals: int):
+    from decimal import Decimal
+    return Decimal(raw) / Decimal(10 ** int(decimals))

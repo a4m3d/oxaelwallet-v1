@@ -13,6 +13,7 @@ import database as dbm
 from telegram.bot import bot
 from transactions import service as TX
 from assets.catalog import NETWORKS, evm_networks, tokens_for
+from assets import discovery
 from chains.evm import evm_adapter
 from chains.solana import solana_adapter
 from intents.near_intents import client as intents_client
@@ -115,9 +116,11 @@ async def _scan_wallet(w: dict):
     if "evm" in accounts:
         addr = accounts["evm"]["address"]
         for net in evm_networks():
-            # native coin
+            handled = await _scan_evm_incoming(uid, wid, w, net.key, addr)
+            if handled:
+                continue
+            # fallback (no explorer key): balance-snapshot detection
             await _check_asset(uid, wid, w, net.key, "evm", addr, net.symbol, None, 18)
-            # ERC-20 tokens (USDC/USDT/…)
             for tok in tokens_for(net.key):
                 await _check_asset(uid, wid, w, net.key, "evm", addr,
                                    tok["symbol"], tok["address"], tok["decimals"])
@@ -125,6 +128,58 @@ async def _scan_wallet(w: dict):
         sol = NETWORKS.get("solana")
         await _check_asset(uid, wid, w, "solana", "solana",
                            accounts["solana"]["address"], sol.symbol, None, 9)
+
+
+async def _scan_evm_incoming(uid: int, wid: str, w: dict, network: str, addr: str) -> bool:
+    """Explorer-based incoming detection with real tx hash + sender.
+
+    Seeds silently on the first scan of a (wallet, network) so pre-existing
+    history is recorded for the feed but never spams notifications; afterwards
+    only genuinely new deposits notify. Returns False if the explorer isn't
+    available so the caller can fall back to balance snapshots.
+    """
+    if not discovery.supported(network):
+        return False
+    try:
+        transfers = await discovery.get_incoming_transfers(network, addr)
+    except Exception:  # noqa: BLE001
+        return True  # explorer supported but transient failure; skip this cycle
+    net = NETWORKS.get(network)
+    cursor = await dbm.track_cursor.find_one({"wallet_id": wid, "network": network})
+    last_ts = cursor["last_ts"] if cursor else None
+    seed = last_ts is None
+    max_ts = last_ts or 0
+    for t in sorted(transfers, key=lambda x: x["ts"]):  # oldest first
+        ts = t["ts"]
+        if not seed and ts <= (last_ts or 0):
+            continue
+        inserted = await TX.record_detected_receive(
+            uid, wid, network, t["symbol"] or (net.symbol if net else ""),
+            t["amount"], tx_hash=t.get("hash"), from_address=t.get("from_addr"),
+            token_address=t.get("token_address"),
+        )
+        max_ts = max(max_ts, ts)
+        if inserted and not seed:
+            link = ""
+            if net and t.get("hash"):
+                link = f'\n<a href="{net.explorer_tx(t["hash"])}">view on explorer ↗</a>'
+            frm = t.get("from_addr") or ""
+            await _notify(uid,
+                f"🔔 <b>Incoming {t['symbol']}</b>\n\n"
+                f"+{fmt_amount(Decimal(t['amount']))} {t['symbol']} on {net.name if net else network}\n"
+                f"Wallet: <b>{w.get('name','')}</b>\n"
+                f"From: <code>{frm[:10]}…{frm[-6:]}</code>{link}")
+    await dbm.track_cursor.update_one(
+        {"wallet_id": wid, "network": network},
+        {"$set": {"telegram_user_id": uid, "last_ts": max_ts or int(_now_ts())}},
+        upsert=True,
+    )
+    return True
+
+
+def _now_ts() -> int:
+    import time
+    return int(time.time())
 
 
 async def _check_asset(uid: int, wid: str, w: dict, network: str, family: str,

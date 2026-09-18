@@ -49,6 +49,10 @@ email_events = _Collection("email_events")
 audit_events = _Collection("audit_events")
 sessions = _Collection("sessions")
 balance_snapshots = _Collection("balance_snapshots")
+track_cursor = _Collection("track_cursor")
+wallet_events = _Collection("wallet_events")
+token_metadata = _Collection("token_metadata")
+notifications = _Collection("notifications")
 
 
 async def ensure_indexes() -> None:
@@ -67,6 +71,9 @@ async def ensure_indexes() -> None:
     await email_verifications.create_index([("token_hash", ASCENDING)])
     await email_verifications.create_index([("telegram_user_id", ASCENDING)])
     await sessions.create_index([("telegram_user_id", ASCENDING)], unique=True)
+    await track_cursor.create_index(
+        [("wallet_id", ASCENDING), ("network", ASCENDING)], unique=True
+    )
     logger.info("MongoDB indexes ensured")
 
 

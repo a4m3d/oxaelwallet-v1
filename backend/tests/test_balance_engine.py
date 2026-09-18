@@ -172,3 +172,25 @@ def test_token_chain_isolation():
     eth_usdc = catalog.token_by_symbol("ethereum", "USDC")
     base_usdc = catalog.token_by_symbol("base", "USDC")
     assert eth_usdc["address"] != base_usdc["address"]           # distinct contracts per chain
+
+
+# ---- deposit recording is deduped by tx hash (no duplicate notifications) ----
+def test_record_receive_dedup_by_txhash():
+    from transactions import service as TX
+    import random
+    import database as dbm
+    uid = random.randint(10_000_000, 99_000_000)
+    wid = "w-" + str(uid)
+
+    async def run():
+        h = "0x" + "a" * 64
+        first = await TX.record_detected_receive(uid, wid, "base", "USDC", "25",
+                                                 tx_hash=h, from_address="0xabc")
+        second = await TX.record_detected_receive(uid, wid, "base", "USDC", "25",
+                                                  tx_hash=h, from_address="0xabc")
+        assert first is True and second is False, "same tx must not be recorded twice"
+        deps = await TX.deposits(uid)
+        assert len(deps) == 1 and deps[0]["direction"] == "receive"
+        assert deps[0]["from_address"] == "0xabc"
+        await dbm.transactions.delete_many({"telegram_user_id": uid})
+    asyncio.run(run())

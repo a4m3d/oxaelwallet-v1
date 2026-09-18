@@ -258,6 +258,8 @@ async def _on_callback(cq: dict) -> None:
     elif head == "trk":
         await W.set_tracking(uid, parts[1], parts[2] == "on")
         await _show_track(chat_id, uid, mid)
+    elif head == "trackdep":
+        await _show_track_deposits(chat_id, uid, mid, int(parts[1]) if len(parts) > 1 else 0)
     elif head == "ab" and parts[1] == "net":
         await _ab_set_network(chat_id, uid, parts[2])
     else:
@@ -765,7 +767,10 @@ async def _show_history(chat_id: int, uid: int, mid: int, wallet_id: str | None,
         nav.append(K.btn("Next ›", f"histp|{wallet_id or ''}|{skip + limit}"))
     if nav:
         rows.append(nav)
-    rows.append([K.btn("🏠 Home", "home")])
+    if wallet_id:
+        rows.append([K.btn("‹ Back", f"w|{wallet_id}"), K.btn("🏠 Home", "home")])
+    else:
+        rows.append([K.btn("🏠 Home", "home")])
     await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
 
 
@@ -784,24 +789,81 @@ async def _show_track(chat_id: int, uid: int, mid: int | None) -> None:
     wallets = await W.list_wallets(uid)
     if not wallets:
         await _show_start(chat_id, uid); return
+    deps = await TX.deposits(uid, limit=6)
     lines = [
-        f"🔔 <b>Track Wallets</b>\n{DIV}",
-        "\nOXAEL watches your wallets on every supported network and notifies you "
-        "the moment <b>native coins or tokens</b> (USDC/USDT…) arrive.\n",
-        "Toggle tracking per wallet:",
+        f"🔔 <b>Track</b>\n{DIV}",
+        "\nOXAEL watches your wallets on every supported chain and alerts you the "
+        "moment a <b>deposit</b> arrives — native coins or tokens, from any chain.\n",
     ]
+    if deps:
+        lines.append("<b>Recent deposits</b>")
+        for d in deps:
+            net = NETWORKS.get(d["network"])
+            when = _rel_time(d.get("created_at"))
+            frm = d.get("from_address")
+            frm_line = f" · from <code>{shorten_address(frm, 6, 4)}</code>" if frm else ""
+            lines.append(f"🟢 +{fmt_amount(Decimal(d['amount']))} {esc(d['asset'])} · "
+                         f"{net.name if net else d['network']} · {when}{frm_line}")
+        lines.append("")
+    else:
+        lines.append("<i>No deposits detected yet — they'll appear here automatically.</i>\n")
+    lines.append("<b>Tracked wallets</b>")
     rows = []
     for w in wallets:
         on = w.get("track_enabled", True)
-        state = "🔔 On" if on else "🔕 Off"
-        lines.append(f"\n<b>{esc(w['name'])}</b> · {state}")
-        if w["addresses"].get("evm"):
-            lines.append(f"EVM  <code>{shorten_address(w['addresses']['evm'])}</code>")
+        lines.append(f"{'🔔' if on else '🔕'} <b>{esc(w['name'])}</b> — {'tracking' if on else 'paused'}")
         toggle = "off" if on else "on"
-        label = f"🔕 Stop {w['name'][:16]}" if on else f"🔔 Track {w['name'][:16]}"
+        label = f"🔕 Pause {w['name'][:14]}" if on else f"🔔 Track {w['name'][:14]}"
         rows.append([K.btn(label, f"trk|{w['wallet_id']}|{toggle}")])
+    rows.append([K.btn("📥 All deposits", "trackdep|0"), K.btn("↻ Refresh", "track")])
     rows.append([K.btn("🏠 Home", "home")])
     await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
+
+
+async def _show_track_deposits(chat_id: int, uid: int, mid: int | None, skip: int) -> None:
+    PAGE = 8
+    total = await TX.deposits_count(uid)
+    deps = await TX.deposits(uid, limit=PAGE, skip=skip)
+    lines = [f"📥 <b>Deposits</b>\n{DIV}"]
+    if not deps:
+        lines.append("\nNo deposits detected yet.")
+    else:
+        for d in deps:
+            net = NETWORKS.get(d["network"])
+            when = _rel_time(d.get("created_at"))
+            frm = d.get("from_address")
+            frm_line = f"\nfrom <code>{shorten_address(frm, 8, 6)}</code>" if frm else ""
+            link = f'  <a href="{d["explorer_url"]}">↗</a>' if d.get("explorer_url") else ""
+            lines.append(f"\n🟢 <b>+{fmt_amount(Decimal(d['amount']))} {esc(d['asset'])}</b>{link}\n"
+                         f"{net.name if net else d['network']} · {when}{frm_line}")
+    rows = []
+    nav = []
+    if skip > 0:
+        nav.append(K.btn("‹ Prev", f"trackdep|{max(0, skip - PAGE)}"))
+    if skip + PAGE < total:
+        nav.append(K.btn("Next ›", f"trackdep|{skip + PAGE}"))
+    if nav:
+        rows.append(nav)
+    rows.append([K.btn("‹ Back", "track"), K.btn("🏠 Home", "home")])
+    await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
+
+
+def _rel_time(iso: str | None) -> str:
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:  # noqa: BLE001
+        return ""
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
 
 
 # =================================================================
