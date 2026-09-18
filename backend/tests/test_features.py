@@ -157,3 +157,58 @@ def test_command_menu_registers_all_commands():
     for c in ["start", "wallet", "wallets", "create", "import", "balance",
               "send", "receive", "swap", "history", "track", "settings", "help"]:
         assert c in cmds, f"/{c} missing from command menu"
+
+
+# ---- token catalog breadth (USDC/USDT/DAI/WETH, per-token decimals) ----
+def test_token_catalog_has_stablecoins_and_weth():
+    eth = {t["symbol"]: t for t in catalog.tokens_for("ethereum")}
+    for sym in ("USDC", "USDT", "DAI", "WETH"):
+        assert sym in eth, f"{sym} missing on ethereum"
+    assert eth["USDC"]["decimals"] == 6
+    assert eth["USDT"]["decimals"] == 6
+    assert eth["DAI"]["decimals"] == 18   # decimals are NOT assumed uniform
+    assert eth["WETH"]["decimals"] == 18
+    # every EVM chain has at least USDC + DAI configured
+    for net in ("base", "arbitrum", "optimism", "polygon", "bnb", "avalanche"):
+        syms = {t["symbol"] for t in catalog.tokens_for(net)}
+        assert "USDC" in syms and "DAI" in syms, f"{net} missing core tokens"
+
+
+# ---- swap: choose a source ASSET (pay USDC, not just native) ----
+def test_swap_source_asset_selection(captured, monkeypatch):
+    async def fake_networks():
+        return ["eth", "sol", "base", "arb"]
+    monkeypatch.setattr(handlers.intents_client, "networks", fake_networks)
+
+    async def run():
+        uid = _uid()
+        await W.get_or_create_user(uid)
+        w = await W.create_wallet(uid, "Main")
+        wid = w["wallet_id"]
+        # pick source network -> asset picker
+        await handlers.process_update(_cb(uid, f"swfrom|net|{wid}|ethereum"))
+        assert any("Which asset will you pay with?" in t for t in captured)
+        # pick USDC as the source asset -> dest picker, state carries token info
+        await handlers.process_update(_cb(uid, f"swasset|{wid}|ethereum|USDC"))
+        sess = await states.get(uid)
+        assert sess["state"] == "swap_dest"
+        assert sess["data"]["from_symbol"] == "USDC"
+        assert sess["data"]["from_token_address"]
+        assert sess["data"]["from_decimals"] == 6
+        await W.delete_wallet(uid, wid)
+    asyncio.run(run())
+
+
+# ---- transaction state machine additions ----
+def test_state_machine_has_estimating_and_replaced():
+    from transactions import state_machine as sm
+    assert sm.ESTIMATING in sm.ALL_STATES
+    assert sm.REPLACED in sm.ALL_STATES
+    assert sm.can_transition(sm.BROADCASTED, sm.REPLACED) is True
+    assert sm.is_terminal(sm.REPLACED) is True
+
+
+# ---- real receipt data available for confirmation persistence ----
+def test_evm_exposes_receipt_details():
+    from chains.evm import evm_adapter
+    assert hasattr(evm_adapter, "get_receipt_details")

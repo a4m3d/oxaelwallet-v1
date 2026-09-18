@@ -189,8 +189,10 @@ async def confirmable() -> list[dict]:
     return [d async for d in cur]
 
 
-async def set_confirmed(tx_id: str) -> None:
-    await _set_state(tx_id, sm.CONFIRMED)
+async def set_confirmed(tx_id: str, **receipt) -> None:
+    """Mark confirmed and persist real receipt data (block, gas, fee) when known."""
+    extra = {k: v for k, v in receipt.items() if v is not None}
+    await _set_state(tx_id, sm.CONFIRMED, **extra)
 
 
 async def set_failed(tx_id: str, err: str = "transaction reverted") -> None:

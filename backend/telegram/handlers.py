@@ -18,6 +18,7 @@ from telegram.bot import bot
 from telegram import keyboards as K
 from telegram import states
 from assets.catalog import NETWORKS, get_network, networks_with, tokens_for, token_by_symbol
+from assets.discovery import discover_token_contracts
 from assets.capabilities import Family
 from wallets import service as W
 from wallets.portfolio import get_portfolio
@@ -128,6 +129,9 @@ async def _on_message(msg: dict) -> None:
     if text.startswith("/track"):
         await states.clear(uid); await _show_track(chat_id, uid, None)
         return
+    if text.startswith("/tokens"):
+        await states.clear(uid); await _show_tokens(chat_id, uid, None)
+        return
 
     # flow input
     sess = await states.get(uid)
@@ -188,6 +192,7 @@ async def _on_callback(cq: dict) -> None:
         "recv": lambda: _recv_pick_network(chat_id, uid, mid, None),
         "swap": lambda: _swap_intro(chat_id, uid, mid),
         "hist": lambda: _show_history(chat_id, uid, mid, None, 0),
+        "tokens": lambda: _show_tokens(chat_id, uid, mid),
         "track": lambda: _show_track(chat_id, uid, mid),
         "settings": lambda: _show_settings(chat_id, uid, mid),
         "security": lambda: _edit(chat_id, mid, _security_text(), K.back("settings")),
@@ -221,6 +226,8 @@ async def _on_callback(cq: dict) -> None:
         await _send_set_network(chat_id, uid, parts[2], parts[3])
     elif head == "sendasset":
         await _send_set_asset(chat_id, uid, parts[1], parts[2], parts[3])
+    elif head == "sendc":
+        await _send_set_token_contract(chat_id, uid, parts[1], parts[2], parts[3])
     elif head == "recv" and parts[1] == "w":
         await _recv_pick_network(chat_id, uid, mid, parts[2])
     elif head == "recv" and parts[1] == "net":
@@ -234,7 +241,9 @@ async def _on_callback(cq: dict) -> None:
     elif head == "histp":
         await _show_history(chat_id, uid, mid, parts[1] or None, int(parts[2]))
     elif head == "swfrom" and parts[1] == "net":
-        await _swap_pick_dest(chat_id, uid, mid, parts[2], parts[3])
+        await _swap_pick_source_asset(chat_id, uid, mid, parts[2], parts[3])
+    elif head == "swasset":
+        await _swap_set_source_asset(chat_id, uid, mid, parts[1], parts[2], parts[3])
     elif head == "swto":
         await _swap_prompt_amount(chat_id, uid, mid, parts[1])
     elif head == "swgo":
@@ -287,19 +296,26 @@ async def _show_home(chat_id: int, uid: int, mid: int | None) -> None:
         res = await _send(chat_id, loading, None)
         target_mid = (res or {}).get("result", {}).get("message_id")
 
-    balances, total = await get_portfolio(wallet)
+    balances, total, statuses = await get_portfolio(wallet)
     lines = [f"{HEAD}\n{DIV}", f"💼 <b>{esc(wallet['name'])}</b>", ""]
     if total is not None:
-        lines.append(f"Total balance\n<b>{fmt_usd(total)}</b>\n")
+        lines.append(f"💰 <b>Portfolio</b>\n<b>{fmt_usd(total)}</b>\n")
     else:
-        lines.append("Total balance\n<b>—</b>  <i>pricing unavailable</i>\n")
+        lines.append("💰 <b>Portfolio</b>\n<b>—</b>  <i>pricing unavailable</i>\n")
     if not balances:
-        lines.append("No assets yet.\nTap 📥 <b>Receive</b> to fund this wallet.")
+        lines.append("No assets yet.\nTap ↓ <b>Receive</b> to fund this wallet.")
     else:
-        for b in balances[:12]:
+        for b in balances[:10]:
             net = NETWORKS.get(b.network)
-            usd = f"  ·  {fmt_usd(b.usd_value)}" if b.usd_value is not None else ""
-            lines.append(f"<b>{fmt_amount(b.amount)} {b.symbol}</b>{usd}\n<i>{net.name if net else b.network}</i>")
+            usd = f"  ≈ {fmt_usd(b.usd_value)}" if b.usd_value is not None else "  ·  <i>no price</i>"
+            sym = esc(b.symbol) + ("" if b.verified else " ⚠️")
+            lines.append(f"<b>{fmt_amount(b.amount)} {sym}</b>{usd}\n<i>{net.name if net else b.network}</i>")
+        extra = len(balances) - 10
+        if extra > 0:
+            lines.append(f"\n<i>+{extra} more — tap 🪙 Tokens</i>")
+    down = [NETWORKS[k].name for k, v in statuses.items() if v == "unavailable" and k in NETWORKS]
+    if down:
+        lines.append(f"\n⚠️ <i>Temporarily unavailable: {', '.join(down)}</i>")
     if wallet["addresses"].get("evm"):
         lines.append(f"\n{DIV}\nEVM  <code>{shorten_address(wallet['addresses']['evm'])}</code>")
     text = "\n".join(lines)
@@ -307,6 +323,35 @@ async def _show_home(chat_id: int, uid: int, mid: int | None) -> None:
         await _edit(chat_id, target_mid, text, K.main_menu())
     else:
         await _send(chat_id, text, K.main_menu())
+
+
+async def _show_tokens(chat_id: int, uid: int, mid: int | None) -> None:
+    wallet = await W.get_primary_wallet(uid)
+    if not wallet:
+        await _show_start(chat_id, uid); return
+    if mid:
+        await _edit(chat_id, mid, "🪙 <b>Tokens</b>\n\n⏳ Discovering your tokens…", None)
+    balances, total, statuses = await get_portfolio(wallet)
+    tokens = [b for b in balances if b.token_address]
+    lines = [f"🪙 <b>Tokens</b>\n{DIV}", f"💼 <b>{esc(wallet['name'])}</b>\n"]
+    if not tokens:
+        lines.append("No ERC-20 tokens held on the supported networks yet.")
+    else:
+        for b in tokens[:20]:
+            net = NETWORKS.get(b.network)
+            title = esc(b.name or b.symbol)
+            badge = "✓" if b.verified else "⚠️ unverified"
+            if b.usd_value is not None:
+                val = f"{fmt_amount(b.amount)} {esc(b.symbol)}  ≈ {fmt_usd(b.usd_value)}"
+            else:
+                val = f"{fmt_amount(b.amount)} {esc(b.symbol)}  ·  <i>price unavailable</i>"
+            addr_line = f"\n<code>{shorten_address(b.token_address, 6, 4)}</code>" if (b.name or b.symbol) == "Unknown" else ""
+            lines.append(f"<b>{title}</b>  <i>{badge}</i>\n{val}\n<i>{net.name if net else b.network}</i>{addr_line}")
+    down = [NETWORKS[k].name for k, v in statuses.items() if v == "unavailable" and k in NETWORKS]
+    if down:
+        lines.append(f"\n⚠️ <i>Temporarily unavailable: {', '.join(down)}</i>")
+    rows = [[K.btn("↻ Refresh", "tokens")], [K.btn("🏠 Home", "home")]]
+    await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
 
 
 # =================================================================
@@ -481,10 +526,27 @@ async def _send_set_network(chat_id: int, uid: int, wallet_id: str, netkey: str)
     if not addr:
         await _send(chat_id, "This wallet has no account for that network.", K.back("home")); return
     if fam == "evm":
-        # let the user pick native or a supported token
+        # let the user pick native, a curated token, or any discovered token held
         rows = [[K.btn(f"{net.symbol} (native)", f"sendasset|{wallet_id}|{netkey}|__native__")]]
+        catalog_syms = set()
+        catalog_addrs = set()
         for t in tokens_for(netkey):
             rows.append([K.btn(t["symbol"], f"sendasset|{wallet_id}|{netkey}|{t['symbol']}")])
+            catalog_syms.add(t["symbol"].upper())
+            catalog_addrs.add(t["address"].lower())
+        # discovered held tokens (verified on-chain), not already in the catalog
+        try:
+            for tok in await discover_token_contracts(netkey, addr):
+                if tok["address"].lower() in catalog_addrs:
+                    continue
+                bal = await evm_adapter.token_balance(netkey, tok, addr)
+                if bal > 0:
+                    label = f"{tok.get('symbol') or 'Token'} ({fmt_amount(bal)})"
+                    rows.append([K.btn(label[:32], f"sendc|{wallet_id}|{netkey}|{tok['address']}")])
+                if len(rows) >= 12:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         rows.append([K.btn("‹ Back", "send")])
         await _send(chat_id, f"📤 <b>Send</b> · {net.name}\n\nWhich asset?", K.kb(rows))
     else:
@@ -504,6 +566,23 @@ async def _send_set_asset(chat_id: int, uid: int, wallet_id: str, netkey: str, s
         if not tok:
             await _send(chat_id, "Unsupported asset.", K.back("home")); return
         await _begin_send_address(chat_id, uid, wallet_id, netkey, fam, tok["symbol"], tok["address"], tok["decimals"], addr)
+
+
+async def _send_set_token_contract(chat_id: int, uid: int, wallet_id: str, netkey: str, contract: str) -> None:
+    """Begin a send for a discovered token identified by its contract address.
+    Metadata (symbol/decimals) is read on-chain (never assumed)."""
+    net = get_network(netkey)
+    fam = net.family.value
+    addr = await W.get_address(uid, wallet_id, fam)
+    if not addr:
+        await _send(chat_id, "This wallet has no account for that network.", K.back("home")); return
+    try:
+        meta = await evm_adapter.token_metadata(netkey, contract)
+    except Exception:  # noqa: BLE001
+        await _send(chat_id, "⚠️ Couldn't read that token's details right now. Try again.", K.back("home")); return
+    symbol = meta.get("symbol") or "TOKEN"
+    decimals = int(meta.get("decimals", 18))
+    await _begin_send_address(chat_id, uid, wallet_id, netkey, fam, symbol, meta["address"], decimals, addr)
 
 
 async def _begin_send_address(chat_id, uid, wallet_id, netkey, fam, symbol, token_address, decimals, addr) -> None:
@@ -564,14 +643,23 @@ async def _flow_send_amount(chat_id: int, uid: int, data: dict, text: str) -> No
     if is_token:
         if amount > asset_bal:
             await states.clear(uid)
-            await _send(chat_id, f"You don't have enough {sym} for this transfer.", K.back("home")); return
+            await _send(chat_id, f"⚠️ <b>Insufficient {sym}</b>\n\n"
+                                 f"You have: <b>{fmt_amount(asset_bal)} {sym}</b>\n"
+                                 f"You tried to send: <b>{fmt_amount(amount)} {sym}</b>", K.back("home")); return
         if fee > native_bal:
             await states.clear(uid)
-            await _send(chat_id, f"You don't have enough {net.symbol} to cover the network fee.", K.back("home")); return
+            await _send(chat_id, f"⚠️ <b>Insufficient gas</b>\n\n"
+                                 f"You have: <b>{fmt_amount(native_bal)} {net.symbol}</b>\n"
+                                 f"Estimated required: <b>{fmt_amount(fee)} {net.symbol}</b>\n\n"
+                                 f"Add {net.symbol} to this wallet to cover the network fee for sending {sym}.",
+                        K.back("home")); return
     else:
         if amount + fee > asset_bal:
             await states.clear(uid)
-            await _send(chat_id, "You don't have enough available balance for this transaction and its network fee.", K.back("home")); return
+            await _send(chat_id, f"⚠️ <b>Insufficient balance</b>\n\n"
+                                 f"You have: <b>{fmt_amount(asset_bal)} {net.symbol}</b>\n"
+                                 f"Needed (amount + fee): <b>{fmt_amount(amount + fee)} {net.symbol}</b>\n"
+                                 f"Estimated network fee: ~{fmt_amount(fee)} {net.symbol}", K.back("home")); return
 
     session_nonce = uuid.uuid4().hex
     tx = await TX.create_pending_send(
@@ -735,25 +823,62 @@ async def _swap_intro(chat_id: int, uid: int, mid: int | None) -> None:
     await _screen(chat_id, mid, text, kb)
 
 
-async def _swap_pick_dest(chat_id: int, uid: int, mid: int, wallet_id: str, netkey: str) -> None:
+async def _swap_pick_source_asset(chat_id: int, uid: int, mid: int, wallet_id: str, netkey: str) -> None:
+    net = get_network(netkey)
+    fam = net.family.value
+    await states.set_state(uid, chat_id, "swap_src_asset", {"wallet_id": wallet_id, "from": netkey})
+    if fam == "evm":
+        rows = [[K.btn(f"{net.symbol} (native)", f"swasset|{wallet_id}|{netkey}|__native__")]]
+        for t in tokens_for(netkey):
+            rows.append([K.btn(t["symbol"], f"swasset|{wallet_id}|{netkey}|{t['symbol']}")])
+        rows.append([K.btn("‹ Back", "swap")])
+        await _screen(chat_id, mid, f"🔄 <b>Swap</b> · {net.name}\n\nWhich asset will you pay with?", K.kb(rows))
+    else:
+        await _swap_set_source_asset(chat_id, uid, mid, wallet_id, netkey, "__native__")
+
+
+async def _swap_set_source_asset(chat_id: int, uid: int, mid: int, wallet_id: str, netkey: str, symbol: str) -> None:
+    net = get_network(netkey)
+    if symbol == "__native__":
+        from_symbol, token_address, decimals = net.symbol, None, net.decimals
+    else:
+        tok = token_by_symbol(netkey, symbol)
+        if not tok:
+            await _send(chat_id, "Unsupported asset.", K.back("home")); return
+        from_symbol, token_address, decimals = tok["symbol"], tok["address"], tok["decimals"]
+    await states.set_state(uid, chat_id, "swap_dest", {
+        "wallet_id": wallet_id, "from": netkey, "from_symbol": from_symbol,
+        "from_token_address": token_address, "from_decimals": decimals,
+    })
+    await _swap_pick_dest(chat_id, uid, mid)
+
+
+async def _swap_pick_dest(chat_id: int, uid: int, mid: int) -> None:
+    sess = await states.get(uid)
+    data = (sess or {}).get("data", {})
     try:
         chains = await intents_client.networks()
     except NearIntentsError as e:
         await _edit(chat_id, mid, f"🔄 <b>Swap</b>\n\nCouldn't reach the routing service.\n<i>{esc(str(e))}</i>", K.back("home"))
         return
-    await states.set_state(uid, chat_id, "swap_dest", {"wallet_id": wallet_id, "from": netkey})
-    src = get_network(netkey)
+    src = get_network(data.get("from", ""))
+    from_symbol = data.get("from_symbol", src.symbol if src else "")
+    # Only offer destinations the wallet can actually receive on, and not the
+    # same chain we're paying from.
+    receivable = [c for c in chains if c in _NEAR_TO_KEY and _NEAR_TO_KEY[c] != data.get("from")]
     rows, row = [], []
-    for ch in chains[:12]:
-        row.append(K.btn(ch, f"swto|{ch}"))
+    for code in receivable:
+        dnet = get_network(_NEAR_TO_KEY[code])
+        row.append(K.btn(dnet.name, f"swto|{code}"))
         if len(row) == 2:
             rows.append(row); row = []
     if row:
         rows.append(row)
     rows.append([K.btn("‹ Back", "swap")])
     text = (
-        f"🔄 <b>Swap</b> · from <b>{src.symbol}</b> ({src.name})\n{DIV}\n"
-        f"Destination networks discovered live: <b>{len(chains)}</b>.\n\nSelect a destination network."
+        f"🔄 <b>Swap</b> · pay <b>{esc(from_symbol)}</b> on {src.name}\n{DIV}\n"
+        f"{len(chains)} networks reachable via NEAR Intents; showing the ones you can "
+        f"receive on with this wallet.\n\nSelect a destination network."
     )
     await _edit(chat_id, mid, text, K.kb(rows))
 
@@ -761,10 +886,13 @@ async def _swap_pick_dest(chat_id: int, uid: int, mid: int, wallet_id: str, netk
 async def _swap_prompt_amount(chat_id: int, uid: int, mid: int, dest_chain: str) -> None:
     sess = await states.get(uid)
     data = (sess or {}).get("data", {})
+    dest_net = get_network(_NEAR_TO_KEY.get(dest_chain, dest_chain))
     data["dest_chain"] = dest_chain
+    data["dest_name"] = dest_net.name if dest_net else dest_chain
     await states.set_state(uid, chat_id, "swap_await_amount", data)
     src = get_network(data.get("from", ""))
-    await _edit(chat_id, mid, f"🔄 <b>Swap</b> · {src.symbol} → {esc(dest_chain)}\n\nEnter the amount of {src.symbol} to swap.", K.back("home"))
+    from_symbol = data.get("from_symbol", src.symbol)
+    await _edit(chat_id, mid, f"🔄 <b>Swap</b> · {esc(from_symbol)} → {esc(data['dest_name'])}\n\nEnter the amount of {esc(from_symbol)} to swap.", K.back("home"))
 
 
 async def _flow_swap_amount(chat_id: int, uid: int, data: dict, text: str) -> None:
@@ -777,22 +905,36 @@ async def _flow_swap_amount(chat_id: int, uid: int, data: dict, text: str) -> No
         return
     await states.clear(uid)
     src = get_network(data["from"])
+    from_symbol = data.get("from_symbol", src.symbol)
+    dest_code = data["dest_chain"]
+    dest_key = _NEAR_TO_KEY.get(dest_code, dest_code)
+    dest_net = get_network(dest_key)
+    dest_fam = dest_net.family.value if dest_net else None
+    dest_name = data.get("dest_name", dest_net.name if dest_net else dest_code)
     try:
         tokens = await intents_client.get_tokens()
-        origin = _match_asset(tokens, _near_code(data["from"]), src.symbol)
-        dest = _match_asset(tokens, data["dest_chain"], None)
+        origin = _match_asset(tokens, _near_code(data["from"]), from_symbol)
+        # prefer the destination chain's native asset, else any asset on it
+        dest = (_match_asset(tokens, dest_code, dest_net.symbol if dest_net else None)
+                or _match_asset(tokens, dest_code, None))
         if not origin or not dest:
             await _send(chat_id, "🔄 Couldn't map those assets in the routing catalog. Try a different pair.", K.back("home"))
             return
-        addr = await W.get_address(uid, data["wallet_id"], src.family.value)
+        # refund goes back to the SOURCE-chain address; recipient is the
+        # user's own address on the DESTINATION chain.
+        refund_addr = await W.get_address(uid, data["wallet_id"], src.family.value)
+        recipient_addr = await W.get_address(uid, data["wallet_id"], dest_fam) if dest_fam else None
+        if not recipient_addr:
+            await _send(chat_id, "🔄 This wallet can't receive on that destination network yet. Pick another destination.", K.back("home"))
+            return
         from datetime import datetime, timedelta, timezone
         deadline = (datetime.now(timezone.utc) + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         payload = {
             "originAsset": origin.get("assetId") or origin.get("id"),
             "destinationAsset": dest.get("assetId") or dest.get("id"),
             "amount": str(int(amount * Decimal(10 ** int(origin.get("decimals", 18))))),
-            "refundTo": addr, "refundType": "ORIGIN_CHAIN",
-            "recipient": addr, "recipientType": "DESTINATION_CHAIN",
+            "refundTo": refund_addr, "refundType": "ORIGIN_CHAIN",
+            "recipient": recipient_addr, "recipientType": "DESTINATION_CHAIN",
             "swapType": "EXACT_INPUT", "slippageTolerance": 100,
             "depositType": "ORIGIN_CHAIN", "depositMode": "SIMPLE",
             "deadline": deadline, "referral": _referral(),
@@ -803,21 +945,30 @@ async def _flow_swap_amount(chat_id: int, uid: int, data: dict, text: str) -> No
         return
     q = quote.get("quote", quote)
     out = q.get("amountOutFormatted") or q.get("amountOut") or "?"
+    min_out = q.get("minAmountOutFormatted") or q.get("minAmountOut")
     deadline = q.get("deadline") or q.get("timeEstimate") or ""
+    dest_sym = esc(dest.get("symbol", ""))
     order_id = uuid.uuid4().hex
     await dbm.swap_orders.insert_one({
         "order_id": order_id, "telegram_user_id": uid, "wallet_id": data["wallet_id"],
-        "payload": payload, "from": data["from"], "dest_chain": data["dest_chain"],
+        "payload": payload, "from": data["from"], "dest_chain": dest_code, "dest_name": dest_name,
+        "from_symbol": from_symbol, "from_token_address": data.get("from_token_address"),
+        "from_decimals": int(data.get("from_decimals", src.decimals)),
         "amount": str(amount), "state": "quoted", "created_at": _iso_now(),
     })
-    text_out = (
-        f"{DIV}\n     <b>SWAP QUOTE</b>\n{DIV}\n\n"
-        f"Pay        <b>{fmt_amount(amount)} {src.symbol}</b>\n"
-        f"Receive    ~<b>{out} {esc(dest.get('symbol',''))}</b>\n"
-        f"Route      {src.name} → {esc(data['dest_chain'])}\n"
-        f"{'Expires    ' + esc(str(deadline)) if deadline else ''}\n\n"
-        "Quotes move with the market. Confirm to lock a deposit address."
-    )
+    lines = [
+        f"{DIV}\n     <b>SWAP QUOTE</b>\n{DIV}\n",
+        f"You pay     <b>{fmt_amount(amount)} {esc(from_symbol)}</b>",
+        f"From        {src.name}",
+        f"You receive ~<b>{out} {dest_sym}</b>",
+        f"To          {esc(dest_name)}",
+    ]
+    if min_out:
+        lines.append(f"Min received ~{esc(str(min_out))} {dest_sym}")
+    if deadline:
+        lines.append(f"Quote expiry {esc(str(deadline))}")
+    lines.append("\nQuotes move with the market. Confirm to lock a deposit address.")
+    text_out = "\n".join(lines)
     await _send(chat_id, text_out, K.kb([[K.btn("✅ Confirm swap", f"swgo|{order_id}")], [K.btn("❌ Cancel", "home")]]))
 
 
@@ -836,9 +987,10 @@ async def _swap_create(chat_id: int, uid: int, mid: int, order_id: str) -> None:
     memo = q.get("depositMemo")
     await dbm.swap_orders.update_one({"order_id": order_id}, {"$set": {"state": "awaiting_deposit", "deposit_address": deposit, "deposit_memo": memo}})
     src = get_network(order["from"])
+    from_symbol = order.get("from_symbol", src.symbol)
     text = (
         f"{DIV}\n  <b>⏳ AWAITING DEPOSIT</b>\n{DIV}\n\n"
-        f"Send exactly <b>{fmt_amount(Decimal(order['amount']))} {src.symbol}</b> on {src.name} to:\n\n"
+        f"Send exactly <b>{fmt_amount(Decimal(order['amount']))} {esc(from_symbol)}</b> on {src.name} to:\n\n"
         f"<code>{deposit}</code>\n"
         + (f"\nMemo/Tag: <code>{memo}</code>\n" if memo else "")
         + "\nTap below to pay straight from your wallet, or send manually. Routing begins automatically once received."
@@ -860,18 +1012,56 @@ async def _swap_pay(chat_id: int, uid: int, mid: int, order_id: str) -> None:
     addr = await W.get_address(uid, order["wallet_id"], fam)
     if not addr:
         await _edit(chat_id, mid, "No account for the source network.", K.back("home")); return
-    await _edit(chat_id, mid, "⚡ <b>Paying deposit from wallet…</b>", None)
     amount = Decimal(order["amount"])
+    token_address = order.get("from_token_address")
+    decimals = int(order.get("from_decimals", src.decimals))
+    from_symbol = order.get("from_symbol", src.symbol)
+
+    # revalidate balance + gas before spending
+    try:
+        if fam == "evm":
+            native_bal = await evm_adapter.native_balance(order["from"], addr)
+            fee = (await (evm_adapter.estimate_token_fee(order["from"]) if token_address
+                         else evm_adapter.estimate_native_fee(order["from"]))).fee_native
+            if token_address:
+                tok_bal = await evm_adapter.token_balance(
+                    order["from"], {"address": token_address, "decimals": decimals}, addr)
+                if amount > tok_bal:
+                    await _edit(chat_id, mid, f"⚠️ <b>Insufficient {esc(from_symbol)}</b>\n\n"
+                                              f"You have: <b>{fmt_amount(tok_bal)} {esc(from_symbol)}</b>\n"
+                                              f"Deposit needs: <b>{fmt_amount(amount)} {esc(from_symbol)}</b>",
+                                K.back("home")); return
+                if fee > native_bal:
+                    await _edit(chat_id, mid, f"⚠️ <b>Insufficient gas</b>\n\n"
+                                              f"You have: <b>{fmt_amount(native_bal)} {src.symbol}</b>\n"
+                                              f"Estimated required: <b>{fmt_amount(fee)} {src.symbol}</b>",
+                                K.back("home")); return
+            elif amount + fee > native_bal:
+                await _edit(chat_id, mid, f"⚠️ <b>Insufficient balance</b>\n\n"
+                                          f"You have: <b>{fmt_amount(native_bal)} {src.symbol}</b>\n"
+                                          f"Needed (amount + fee): <b>{fmt_amount(amount + fee)} {src.symbol}</b>",
+                            K.back("home")); return
+        else:
+            native_bal = await solana_adapter.native_balance(addr)
+            fee = (await solana_adapter.estimate_native_fee()).fee_native
+            if amount + fee > native_bal:
+                await _edit(chat_id, mid, f"⚠️ <b>Insufficient balance</b>\n\n"
+                                          f"You have: <b>{fmt_amount(native_bal)} {src.symbol}</b>",
+                            K.back("home")); return
+    except Exception:  # noqa: BLE001
+        pass  # best-effort pre-check; broadcast still guards on-chain
+
+    await _edit(chat_id, mid, "⚡ <b>Paying deposit from wallet…</b>", None)
     # idempotent: order_id is the session nonce, so re-taps won't double-pay
     tx = await TX.create_pending_send(
-        uid, order["wallet_id"], order["from"], src.symbol, order["deposit_address"],
-        str(amount), fam, addr, f"swap:{order_id}",
+        uid, order["wallet_id"], order["from"], from_symbol, order["deposit_address"],
+        str(amount), fam, addr, f"swap:{order_id}", token_address, decimals,
     )
     result = await TX.confirm_and_broadcast(uid, tx["tx_id"])
     if result.get("state") == SM.BROADCASTED:
         await dbm.swap_orders.update_one({"order_id": order_id}, {"$set": {"state": "processing", "deposit_tx": result.get("tx_hash")}})
         text = (
-            f"✅ <b>Deposit sent.</b>\n\n{fmt_amount(amount)} {src.symbol} → routing\n"
+            f"✅ <b>Deposit sent.</b>\n\n{fmt_amount(amount)} {esc(from_symbol)} → routing\n"
             f"<code>{shorten_address(result.get('tx_hash',''), 10, 8)}</code>\n\n"
             "We'll notify you as the swap progresses."
         )
@@ -903,6 +1093,10 @@ _NEAR_CODE = {
     "ethereum": "eth", "base": "base", "arbitrum": "arb", "optimism": "op",
     "polygon": "pol", "bnb": "bsc", "avalanche": "avax", "solana": "sol",
 }
+
+# Reverse map: 1Click chain code -> our network key. Only destinations we can
+# actually receive on (i.e. this wallet holds an address for them) are offered.
+_NEAR_TO_KEY = {v: k for k, v in _NEAR_CODE.items()}
 
 
 def _near_code(network_key: str) -> str:

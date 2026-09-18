@@ -25,6 +25,8 @@ class AssetBalance:
     decimals: int
     token_address: str | None = None
     usd_value: Decimal | None = None
+    name: str | None = None
+    verified: bool = True
 
 
 @dataclass

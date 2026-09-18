@@ -49,6 +49,15 @@ def test_webhook_correct_header_empty_update():
 TEST_UID = random.randint(10_000_000_000, 99_000_000_000)
 
 
+def _run_async(coro):
+    """Run a coroutine on a fresh event loop (order-independent under xdist)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _post(update):
     return requests.post(
         f"{BASE_URL}/api/telegram/webhook",
@@ -119,7 +128,7 @@ def test_full_start_and_create_flow():
         client.close()
         return user, wallet
 
-    user, wallet = asyncio.get_event_loop().run_until_complete(check_db())
+    user, wallet = _run_async(check_db())
     assert user is not None, "user not persisted"
     assert wallet is not None, "wallet not persisted"
 
@@ -171,6 +180,6 @@ def _cleanup():
         await db.transactions.delete_many({"telegram_user_id": TEST_UID})
         client.close()
     try:
-        asyncio.get_event_loop().run_until_complete(rm())
+        _run_async(rm())
     except Exception:
         pass

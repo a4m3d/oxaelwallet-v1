@@ -49,9 +49,11 @@ async def _check_one(tx: dict):
     net = NETWORKS.get(tx["network"])
     tx_hash = tx.get("tx_hash")
     uid = tx["telegram_user_id"]
+    receipt: dict = {}
     try:
         if tx["family"] == "evm":
-            status = await evm_adapter.get_receipt_status(tx["network"], tx_hash)
+            receipt = await evm_adapter.get_receipt_details(tx["network"], tx_hash) or {}
+            status = receipt.get("status")
             if status is None:
                 return
             confirmed = status == 1
@@ -73,12 +75,24 @@ async def _check_one(tx: dict):
     explorer = net.explorer_tx(tx_hash) if net else None
     link = f'\n<a href="{explorer}">view on explorer ↗</a>' if explorer else ""
     if confirmed:
-        await TX.set_confirmed(tx["tx_id"])
+        await TX.set_confirmed(
+            tx["tx_id"],
+            block_number=receipt.get("block_number"),
+            gas_used=receipt.get("gas_used"),
+            gas_price=receipt.get("gas_price"),
+            fee_native=receipt.get("fee_native"),
+        )
+        fee_line = ""
+        if receipt.get("fee_native") and net:
+            fee_line = f"\nNetwork fee: {fmt_amount(Decimal(receipt['fee_native']))} {net.symbol}"
+        block_line = f"\nBlock: {receipt['block_number']}" if receipt.get("block_number") else ""
         await _notify(uid, f"✅ <b>Transaction confirmed.</b>\n\n"
-                           f"{fmt_amount(Decimal(tx['amount']))} {tx['asset']} · {net.name if net else tx['network']}{link}")
+                           f"{fmt_amount(Decimal(tx['amount']))} {tx['asset']} · {net.name if net else tx['network']}"
+                           f"{fee_line}{block_line}{link}")
     else:
         await TX.set_failed(tx["tx_id"])
         await _notify(uid, f"⚠️ <b>Transaction failed on-chain.</b>\n\n"
+                           f"The transaction was not confirmed (reverted).\n"
                            f"{fmt_amount(Decimal(tx['amount']))} {tx['asset']} · {net.name if net else tx['network']}{link}")
 
 

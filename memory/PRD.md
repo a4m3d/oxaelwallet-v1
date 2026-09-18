@@ -91,6 +91,39 @@ optional provider-independent email · webhook auth · secret redaction · tests
 - Swap routing: all NEAR Intents/1Click chains, discovered dynamically.
 - Solana SPL-token send: NOT implemented (flagged token_send_supported=False).
 
+## Implemented (2026-06) — session 3 (balance engine + discovery + swap assets)
+- ✅ ROOT-CAUSE FIX for "imported wallet → error → no balances": chains had a
+  single hard-coded RPC; `eth.llamarpc.com`→525 and `polygon-rpc.com`→401 from
+  the server made Ethereum/Polygon reads throw. Rebuilt `chains/evm.py` with a
+  **multi-RPC fallback engine** (publicnode/drpc/ankr + `RPC_<NET>` override
+  tried first), a distinct `RpcUnavailable` error, and a remembered last-good
+  endpoint. Verified: all 7 EVM chains now return real balances.
+- ✅ Portfolio engine returns per-network **status** (ok/unavailable); one network
+  provider outage no longer fails the whole wallet — other networks still show.
+- ✅ Automatic **ERC-20 token discovery** via Etherscan V2 unified API (one
+  `ETHERSCAN_API_KEY` for all chains) → `assets/discovery.py`. Discovered tokens
+  are verified on-chain (balanceOf) before display; graceful `[]` fallback with
+  no key. Unknown/spam tokens handled (blank metadata, "Unknown", ⚠️ unverified).
+- ✅ Prices only applied where a reliable coingecko id exists; discovered tokens
+  show "price unavailable" and never inflate the portfolio total.
+- ✅ New Web3 UI: Portfolio home (per-network outage note), 🪙 **Tokens** view,
+  refreshed main menu (Send/Receive/Swap/Tokens/Activity/Track/Wallets/Settings).
+- ✅ /send now lists **discovered held tokens** (on-chain metadata) in addition
+  to the curated catalog — any held token is sendable, chain-isolated.
+- ✅ Swap: **source-asset selection** (pay USDC/native, not only native) +
+  correct destination-chain recipient address + one-tap token/native deposit
+  with balance & gas revalidation; destinations limited to receivable networks.
+- ✅ Real receipt data (block/gas/fee) persisted on confirmation; tx state
+  machine gained `estimating`/`replaced`.
+- ✅ Token catalog expanded to USDC/USDT/DAI/WETH across the 7 EVM chains.
+- ✅ Tests: 65 passing (added test_balance_engine.py: RPC fallback order,
+  fallback-to-next, RpcUnavailable, discovery key-gating, partial-outage
+  portfolio, no-fake-price total, chain isolation).
+
+### Explorer / RPC providers
+- RPC (primary): publicnode.com, drpc.org, ankr, chain-official — per chain, with fallback.
+- Explorer/indexer: Etherscan V2 unified API (chainid) for token discovery + history-ready.
+
 ## Backlog / remaining (prioritized)
 - P2: Solana SPL token send; UTXO signing (BTC/LTC/DOGE); Tron/XRP/TON adapters.
 - P2: On-chain history indexing beyond OXAEL-originated txs.

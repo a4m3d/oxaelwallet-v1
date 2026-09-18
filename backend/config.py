@@ -34,6 +34,9 @@ class Settings:
     NEAR_INTENTS_API_KEY = _get("NEAR_INTENTS_API_KEY")
     NEAR_INTENTS_REFERRAL = _get("NEAR_INTENTS_REFERRAL", "oxael")
 
+    # explorer / indexer (Etherscan V2 unified API — one key, all EVM chains)
+    ETHERSCAN_API_KEY = _get("ETHERSCAN_API_KEY")
+
     # email (optional)
     EMAIL_PROVIDER = _get("EMAIL_PROVIDER")
     EMAIL_FROM = _get("EMAIL_FROM")

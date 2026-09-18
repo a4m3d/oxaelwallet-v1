@@ -33,10 +33,11 @@ def security_ack() -> dict:
 
 def main_menu() -> dict:
     return kb([
-        [btn("📤  Send", "send"), btn("📥  Receive", "recv")],
-        [btn("🔄  Swap", "swap"), btn("📜  History", "hist")],
-        [btn("👛  Wallets", "wallets"), btn("🔔  Track", "track")],
-        [btn("⚙️  Settings", "settings"), btn("↻  Refresh", "home")],
+        [btn("↑  Send", "send"), btn("↓  Receive", "recv")],
+        [btn("⇄  Swap", "swap"), btn("🪙  Tokens", "tokens")],
+        [btn("◷  Activity", "hist"), btn("🔔  Track", "track")],
+        [btn("👛  Wallets", "wallets"), btn("⚙️  Settings", "settings")],
+        [btn("↻  Refresh", "home")],
     ])
 
 
