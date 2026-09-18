@@ -120,6 +120,22 @@ optional provider-independent email · webhook auth · secret redaction · tests
   fallback-to-next, RpcUnavailable, discovery key-gating, partial-outage
   portfolio, no-fake-price total, chain isolation).
 
+## Added (2026-06) — session 6 (track external addresses + full 1Click swap)
+- ✅ **Track ANY pasted address** (not just owned wallets): `wallets/tracking.py`
+  + `tracked_wallets` collection. `/track` now has "➕ Track an address" → paste
+    an EVM (0x…) or Solana address (+ optional label) → validated, duplicate-guarded,
+    listed with a 🗑 remove button. The watcher scans external addresses every cycle
+    (explorer-based, real tx hash + sender, silent seed, dedup) and DMs on deposits.
+- ✅ **Full-fledged NEAR Intents 1Click swap** verified against the live API:
+  dynamic token catalog → dry quote (HTTP 201, e.g. 100 USDC→0.885 SOL with
+  min-out/fees/time) → non-dry order returns a real deposit address → one-tap pay
+  → NEW `submit_deposit` notifies 1Click of the on-chain deposit tx (faster routing)
+  → status polling to completion/refund/fail. Source-asset selection + correct
+  destination-chain recipient already in place.
+- ✅ Tests: 71 passing (added test_tracking.py: family detection, add/list/dedup/
+  remove, client method surface). Live webhook smoke: paste-to-track created the
+  external entry with label.
+
 ## Added (2026-06) — session 5 (standalone /track + deposit feed + back-nav)
 - ✅ `/track` is now its OWN section (not merged into Wallets): shows a live
   **deposit feed** (amount · token · chain · sender · time) across all wallets,

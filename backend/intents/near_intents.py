@@ -70,6 +70,19 @@ class NearIntentsClient:
         body.setdefault("dry", dry)
         return await self._request("POST", "/v0/quote", json=body)
 
+    async def submit_deposit(self, tx_hash: str, deposit_address: str,
+                             deposit_memo: str | None = None) -> dict | None:
+        """Notify 1Click that the deposit tx was broadcast so routing starts
+        immediately (best-effort; polling still works if this is unavailable)."""
+        body: dict = {"txHash": tx_hash, "depositAddress": deposit_address}
+        if deposit_memo:
+            body["depositMemo"] = deposit_memo
+        try:
+            return await self._request("POST", "/v0/deposit/submit", json=body)
+        except NearIntentsError as e:  # non-fatal
+            logger.info("deposit submit skipped: %s", e)
+            return None
+
     async def get_status(self, deposit_address: str, deposit_memo: str | None = None) -> dict:
         params = {"depositAddress": deposit_address}
         if deposit_memo:

@@ -107,6 +107,31 @@ async def _receive_loop():
                 await _scan_wallet(w)
         except Exception:  # noqa: BLE001
             logger.exception("receive loop error")
+        try:
+            cur = dbm.tracked_wallets.find({"track_enabled": {"$ne": False}}, {"_id": 0})
+            async for t in cur:
+                await _scan_tracked(t)
+        except Exception:  # noqa: BLE001
+            logger.exception("tracked loop error")
+
+
+async def _scan_tracked(t: dict):
+    """Scan an externally tracked address (not an owned wallet)."""
+    uid = t["telegram_user_id"]
+    wid = f"ext:{t['tracked_id']}"
+    addr = t["address"]
+    label = t.get("label", "Watched address")
+    if t.get("family") == "evm":
+        for net in evm_networks():
+            handled = await _scan_evm_incoming(uid, wid, {"name": label}, net.key, addr)
+            if not handled:
+                await _check_asset(uid, wid, {"name": label}, net.key, "evm", addr, net.symbol, None, 18)
+                for tok in tokens_for(net.key):
+                    await _check_asset(uid, wid, {"name": label}, net.key, "evm", addr,
+                                       tok["symbol"], tok["address"], tok["decimals"])
+    elif t.get("family") == "solana":
+        sol = NETWORKS.get("solana")
+        await _check_asset(uid, wid, {"name": label}, "solana", "solana", addr, sol.symbol, None, 9)
 
 
 async def _scan_wallet(w: dict):

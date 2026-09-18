@@ -21,6 +21,7 @@ from assets.catalog import NETWORKS, get_network, networks_with, tokens_for, tok
 from assets.discovery import discover_token_contracts
 from assets.capabilities import Family
 from wallets import service as W
+from wallets import tracking as TR
 from wallets.portfolio import get_portfolio
 from wallets.import_service import classify_secret
 from transactions import service as TX
@@ -157,6 +158,8 @@ async def _on_message(msg: dict) -> None:
         await _flow_ab_label(chat_id, uid, data, text)
     elif state == "ab_await_address":
         await _flow_ab_address(chat_id, uid, data, text)
+    elif state == "track_await_address":
+        await _flow_track_add(chat_id, uid, text)
     else:
         await _show_start(chat_id, uid)
 
@@ -260,6 +263,11 @@ async def _on_callback(cq: dict) -> None:
         await _show_track(chat_id, uid, mid)
     elif head == "trackdep":
         await _show_track_deposits(chat_id, uid, mid, int(parts[1]) if len(parts) > 1 else 0)
+    elif head == "trackadd":
+        await _prompt_track_add(chat_id, uid, mid)
+    elif head == "trackrm":
+        await TR.remove_tracked(uid, parts[1])
+        await _show_track(chat_id, uid, mid)
     elif head == "ab" and parts[1] == "net":
         await _ab_set_network(chat_id, uid, parts[2])
     else:
@@ -815,9 +823,50 @@ async def _show_track(chat_id: int, uid: int, mid: int | None) -> None:
         toggle = "off" if on else "on"
         label = f"🔕 Pause {w['name'][:14]}" if on else f"🔔 Track {w['name'][:14]}"
         rows.append([K.btn(label, f"trk|{w['wallet_id']}|{toggle}")])
+    external = await TR.list_tracked(uid)
+    if external:
+        lines.append("\n<b>Watched addresses</b>")
+        for e in external:
+            net_lbl = "EVM" if e["family"] == "evm" else "Solana"
+            lines.append(f"👁 <b>{esc(e['label'])}</b> · {net_lbl}\n<code>{shorten_address(e['address'])}</code>")
+            rows.append([K.btn(f"🗑 {e['label'][:16]}", f"trackrm|{e['tracked_id']}")])
+    rows.append([K.btn("➕ Track an address", "trackadd")])
     rows.append([K.btn("📥 All deposits", "trackdep|0"), K.btn("↻ Refresh", "track")])
     rows.append([K.btn("🏠 Home", "home")])
     await _screen(chat_id, mid, "\n".join(lines), K.kb(rows))
+
+
+async def _prompt_track_add(chat_id: int, uid: int, mid: int | None) -> None:
+    await states.set_state(uid, chat_id, "track_await_address", {})
+    await _screen(chat_id, mid,
+        "👁 <b>Track an address</b>\n\n"
+        "Paste any <b>EVM (0x…)</b> or <b>Solana</b> address you want to watch. "
+        "You'll be notified whenever it receives a deposit.\n\n"
+        "Optionally add a label after a space, e.g.\n"
+        "<code>0xabc… Exchange cold wallet</code>",
+        K.back("track"))
+
+
+async def _flow_track_add(chat_id: int, uid: int, text: str) -> None:
+    await states.clear(uid)
+    parts = text.strip().split(None, 1)
+    address = parts[0]
+    label = parts[1] if len(parts) > 1 else None
+    try:
+        entry = await TR.add_tracked(uid, address, label)
+    except ValueError as e:
+        if str(e) == "already_tracked":
+            await _send(chat_id, "👁 You're already tracking that address.",
+                        K.kb([[K.btn("‹ Back to Track", "track")]]))
+            return
+        await _send(chat_id, f"⚠️ {esc(str(e))}", K.back("track"))
+        return
+    net_lbl = "EVM" if entry["family"] == "evm" else "Solana"
+    await _send(chat_id,
+        f"✅ <b>Now tracking</b>\n\n<b>{esc(entry['label'])}</b> · {net_lbl}\n"
+        f"<code>{shorten_address(entry['address'], 8, 6)}</code>\n\n"
+        "You'll get a deposit alert the moment crypto arrives.",
+        K.kb([[K.btn("👁 Open Track", "track")], [K.btn("🏠 Home", "home")]]))
 
 
 async def _show_track_deposits(chat_id: int, uid: int, mid: int | None, skip: int) -> None:
@@ -1122,6 +1171,11 @@ async def _swap_pay(chat_id: int, uid: int, mid: int, order_id: str) -> None:
     result = await TX.confirm_and_broadcast(uid, tx["tx_id"])
     if result.get("state") == SM.BROADCASTED:
         await dbm.swap_orders.update_one({"order_id": order_id}, {"$set": {"state": "processing", "deposit_tx": result.get("tx_hash")}})
+        # notify 1Click so routing starts immediately (best-effort)
+        try:
+            await intents_client.submit_deposit(result.get("tx_hash"), order["deposit_address"], order.get("deposit_memo"))
+        except Exception:  # noqa: BLE001
+            pass
         text = (
             f"✅ <b>Deposit sent.</b>\n\n{fmt_amount(amount)} {esc(from_symbol)} → routing\n"
             f"<code>{shorten_address(result.get('tx_hash',''), 10, 8)}</code>\n\n"
